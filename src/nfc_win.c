@@ -349,6 +349,11 @@ nfc_win_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
 		    scard_r);
 		goto fail;
 	}
+	/* XXX pedro: double-check this */
+	if (readers_ptr == NULL) {
+		fido_log_debug("%s: readers_ptr == NULL", __func__);
+		goto fail;
+	}
 
 	reader = readers_ptr;
 
