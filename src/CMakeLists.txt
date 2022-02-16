@@ -93,7 +93,7 @@ list(APPEND COMPAT_SOURCES
 )
 
 if(WIN32)
-	list(APPEND BASE_LIBRARIES wsock32 ws2_32 bcrypt setupapi hid)
+	list(APPEND BASE_LIBRARIES wsock32 ws2_32 winscard bcrypt setupapi hid)
 elseif(APPLE)
 	list(APPEND BASE_LIBRARIES "-framework CoreFoundation" "-framework IOKit")
 endif()
