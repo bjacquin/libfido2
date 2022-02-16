@@ -306,7 +306,7 @@ fido_dev_info_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
 
 	if (fido_dev_register_manifest_func(fido_hid_manifest) != FIDO_OK)
 		return (FIDO_ERR_INTERNAL);
-#ifdef NFC_LINUX
+#if defined(NFC_LINUX) || defined(_WIN32)
 	if (fido_dev_register_manifest_func(fido_nfc_manifest) != FIDO_OK)
 		return (FIDO_ERR_INTERNAL);
 #endif
@@ -345,7 +345,7 @@ fido_dev_open(fido_dev_t *dev, const char *path)
 {
 	int ms = dev->timeout_ms;
 
-#ifdef NFC_LINUX
+#if defined(NFC_LINUX) || defined(_WIN32)
 	if (strncmp(path, FIDO_NFC_PREFIX, strlen(FIDO_NFC_PREFIX)) == 0) {
 		dev->io_own = true;
 		dev->io = (fido_dev_io_t) {
