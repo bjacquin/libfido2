@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2022 Micro Focus or one of its affiliates.
- * Licensed under BSD 2 - Clause “Simplified” License(the "License");
+ * Licensed under BSD 2 - Clause Simplified License(the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at :
  * https://github.com/Yubico/libfido2/blob/master/LICENSE
