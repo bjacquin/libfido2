@@ -10,7 +10,11 @@
 #include "fido/param.h"
 #include "iso7816.h"
 
-static const uint8_t apdu_select[] = { 0x00, 0xA4, 0x04, 0x00, 0x08, 0xA0,0x00,0x00,0x06,0x47,0x2F,0x00,0x01, 0x00 };
+static const uint8_t select_apdu[] = {
+	0x00, 0xa4, 0x04, 0x00, 0x08, 0xA0, 0x00,
+	0x00, 0x06 ,0x47, 0x2F, 0x00, 0x01, 0x00,
+};
+
 static const uint8_t v_u2f[] = { 'U', '2', 'F', '_', 'V', '2' };
 static const uint8_t v_fido[] = { 'F', 'I', 'D', 'O', '_', '2', '_', '0' };
 static const char *nfc_win_path_prefix = "\\\\?\\nfc#";
@@ -33,8 +37,8 @@ nfc_win_tx(fido_dev_t *dev, uint8_t cmd, const unsigned char *buf, size_t count)
 
 	switch (cmd) {
 	case CTAP_CMD_INIT: /* select */
-		ptr = apdu_select;
-		len = sizeof(apdu_select);
+		ptr = select_apdu;
+		len = sizeof(select_apdu);
 		break;
 	case CTAP_CMD_CBOR: /* wrap cbor */
 		if (count > UINT16_MAX || (apdu = iso7816_new(0x80, 0x10, 0x80,
@@ -168,23 +172,6 @@ nfc_win_is_nfc_path(const char *path)
 }
 
 static char *
-nfc_win_make_path(const char *reader)
-{
-	char *path;
-	size_t len;
-
-	/* XXX pedro: fix strlen() + strlen() + 1 */
-	len = strlen(nfc_win_path_prefix) + strlen(reader) + 1;
-	/* XXX pedro: fix strcpy, strcat */
-	if ((path = malloc(len)) != NULL) {
-		strcpy(path, nfc_win_path_prefix);
-		strcat(path, reader);
-	}
-
-	return path;
-}
-
-static char *
 nfc_win_get_reader(const char *path)
 {
 	char *reader = NULL;
@@ -197,186 +184,190 @@ nfc_win_get_reader(const char *path)
 }
 
 static int
-nfc_win_copy_info(fido_dev_info_t *di, SCARDCONTEXT scard_ctx,
-    const char *reader)
+prepare_io_request(DWORD prot, SCARD_IO_REQUEST *req)
 {
-	SCARDHANDLE scard_handle = 0;
-	DWORD       active_proto = 0;
-	char        *vendor = NULL;
-	DWORD       vendor_len;
-	LONG        scard_r;
-	int         ok = -1;
+	switch (prot) {
+	case SCARD_PROTOCOL_T0:
+		req->dwProtocol = SCARD_PCI_T0->dwProtocol;
+		req->cbPciLength = SCARD_PCI_T0->cbPciLength;
+		break;
+	case SCARD_PROTOCOL_T1:
+		req->dwProtocol = SCARD_PCI_T1->dwProtocol;
+		req->cbPciLength = SCARD_PCI_T1->cbPciLength;
+		break;
+	default:
+		fido_log_debug("%s: unknown protocol %u", __func__, prot);
+		return -1;
+	}
+
+	return 0;
+}
+
+static bool
+is_fido(SCARDHANDLE h, const SCARD_IO_REQUEST *req)
+{
+	unsigned char buf[64];
+	DWORD len;
+	LONG s;
+
+	len = sizeof(buf);
+	if ((s = SCardTransmit(h, req, select_apdu, (DWORD)sizeof(select_apdu),
+	    NULL, buf, &len)) != SCARD_S_SUCCESS) {
+		fido_log_debug("%s: SCardTransmit 0x%lx", __func__, s);
+		return false;
+	}
+	if (len < 2 || ((buf[len - 2] << 8) | buf[len - 1]) != SW_NO_ERROR) {
+		fido_log_debug("%s: len %zu", __func__, (size_t)len);
+		return false;
+	}
+	len -= 2;
+	if (len == sizeof(v_u2f) && memcmp(buf, v_u2f, len) == 0) {
+		fido_log_debug("%s: u2f", __func__);
+		return true;
+	}
+	if (len == sizeof(v_fido) && memcmp(buf, v_fido, len) == 0) {
+		fido_log_debug("%s: fido2", __func__);
+		return true;
+	}
+
+	return false;
+}
+
+static char *
+getattr(SCARDCONTEXT ctx, SCARDHANDLE h, DWORD attr)
+{
+	char *buf = NULL, *ret;
+	DWORD len = SCARD_AUTOALLOCATE;
+	LONG s;
+
+	if ((s = SCardGetAttrib(h, attr, (void *)&buf,
+	    &len)) != SCARD_S_SUCCESS) {
+		fido_log_debug("%s: SCardGetAttrib 0x%lx", __func__, s);
+		return NULL;
+	}
+	ret = strndup(buf, len);
+	SCardFreeMemory(ctx, buf);
+
+	return ret;
+}
+
+static int
+copy_info(fido_dev_info_t *di, SCARDCONTEXT ctx, const char *reader)
+{
+	SCARDHANDLE h = 0;
+	SCARD_IO_REQUEST req;
+	DWORD prot = 0;
+	LONG s;
+	char path[512];
+	int r, ok = -1;
 
 	memset(di, 0, sizeof(*di));
+	memset(&req, 0, sizeof(req));
 
-	scard_r = SCardConnectA(scard_ctx, reader, SCARD_SHARE_SHARED,
-	    SCARD_PROTOCOL_Tx, &scard_handle, &active_proto);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardConnectA(): 0x%08X", __func__,
-		    scard_r);
+	if ((s = SCardConnectA(ctx, reader, SCARD_SHARE_SHARED,
+	    SCARD_PROTOCOL_Tx, &h, &prot)) != SCARD_S_SUCCESS) {
+		fido_log_debug("%s: SCardConnectA 0x%x", __func__, s);
 		goto fail;
 	}
-
-	vendor_len = SCARD_AUTOALLOCATE;
-	scard_r = SCardGetAttrib(scard_handle, SCARD_ATTR_VENDOR_NAME,
-	    (LPBYTE)&vendor, &vendor_len);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCARD_ATTR_VENDOR_NAME: 0x%08X", __func__,
-		    scard_r);
+	if (prepare_io_request(prot, &req) < 0) {
+		fido_log_debug("%s: prepare_io_request", __func__);
 		goto fail;
 	}
-
-	if ((di->path = nfc_win_make_path(reader)) == NULL) {
-		fido_log_debug("%s: nfc_win_make_path()", __func__);
+	if (is_fido(h, &req) < 0) {
+		fido_log_debug("%s: skipping %s", __func__, reader);
 		goto fail;
 	}
-
-	/* XXX pedro: check NULL? */
-	di->manufacturer = nfc_win_strdup_n(vendor, vendor_len);
+	if ((r = snprintf(path, sizeof(path), "%s//winscard:{%s}",
+	    FIDO_NFC_PREFIX, reader)) < 0 || (size_t)r >= sizeof(path)) {
+		fido_log_debug("%s: snprintf", __func__);
+		goto fail;
+	}
+	di->path = strdup(path);
+	if ((di->manufacturer = getattr(ctx, h,
+	    SCARD_ATTR_VENDOR_NAME)) == NULL)
+		di->manufacturer = strdup("");
+	if ((di->product = getattr(ctx, h,
+	    SCARD_ATTR_DEVICE_FRIENDLY_NAME)) == NULL)
+		di->product = strdup("");
+	if (di->path == NULL || di->manufacturer == NULL || di->product == NULL)
+		goto fail;
 
 	ok = 0;
 fail:
-	if (vendor != NULL)
-		SCardFreeMemory(scard_ctx, vendor);
-	if (scard_handle != 0)
-		SCardDisconnect(scard_handle, SCARD_LEAVE_CARD);
+	if (h != 0)
+		SCardDisconnect(h, SCARD_LEAVE_CARD);
+	if (ok < 0) {
+		free(di->path);
+		free(di->manufacturer);
+		free(di->product);
+		explicit_bzero(di, sizeof(*di));
+	}
 
 	return ok;
 }
 
-static int
-nfc_win_is_fido(SCARDCONTEXT scard_ctx, const char *reader)
+int
+fido_nfc_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
 {
-	SCARDHANDLE         scard_handle = 0;
-	DWORD               scard_active_protocol = 0;
-	SCARD_IO_REQUEST    scard_tx_pci;
-	uint8_t             rx_buf[64];
-	DWORD               rx_len = sizeof(rx_buf);
-	LONG                scard_r;
-	int                 ok = -1;
-
-	scard_r = SCardConnectA(scard_ctx, reader, SCARD_SHARE_SHARED,
-	    SCARD_PROTOCOL_Tx, &scard_handle, &scard_active_protocol);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardConnectA(): 0x%08X", __func__,
-		    scard_r);
-		goto fail;
-	}
-
-	fido_log_debug("%s: scard_active_protocol 0x%08X", __func__,
-	    scard_active_protocol);
-
-	switch (scard_active_protocol) {
-	case SCARD_PROTOCOL_T0:
-		scard_tx_pci.dwProtocol = SCARD_PCI_T0->dwProtocol;
-		scard_tx_pci.cbPciLength = SCARD_PCI_T0->cbPciLength;
-		break;
-	case SCARD_PROTOCOL_T1:
-		scard_tx_pci.dwProtocol = SCARD_PCI_T1->dwProtocol;
-		scard_tx_pci.cbPciLength = SCARD_PCI_T1->cbPciLength;
-		break;
-	default:
-		fido_log_debug("%s: unknown card protocol", __func__);
-		goto fail;
-	}
-
-	scard_r = SCardTransmit(scard_handle, &scard_tx_pci, apdu_select,
-	    (DWORD)sizeof(apdu_select), NULL, rx_buf, &rx_len);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardTransmit(): 0x%08X", __func__, scard_r);
-		goto fail;
-	}
-
-	if ((rx_len < 2) ||
-	    (rx_buf[rx_len - 2] << 8 | rx_buf[rx_len - 1]) != SW_NO_ERROR) {
-		fido_log_debug("%s: rx_len", __func__);
-		goto fail;
-	}
-
-	rx_len -= 2;
-
-	if (rx_len == sizeof(v_u2f) &&
-	    memcmp(rx_buf, v_u2f, sizeof(v_u2f)) == 0)
-		ok = 0;
-	else if (rx_len == sizeof(v_fido) && memcmp(rx_buf, v_fido,
-	    sizeof(v_fido)) == 0)
-		ok = 0;
-
-fail:
-	if (scard_handle != 0)
-		SCardDisconnect(scard_handle, SCARD_LEAVE_CARD);
-
-	return ok;
-}
-
-static int
-nfc_win_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
-{
-	SCARDCONTEXT    scard_ctx = 0;
-	LPSTR           readers_ptr = NULL;
-	DWORD           readers_len = SCARD_AUTOALLOCATE;
-	LPSTR           reader = NULL;
-	LONG            scard_r;
-	int             r = FIDO_OK;
+	SCARDCONTEXT ctx = 0;
+	const char *buf = NULL, *reader;
+	DWORD len;
+	LONG s;
+	int r = FIDO_ERR_INTERNAL;
 
 	*olen = 0;
 
 	if (ilen == 0)
 		return FIDO_OK;
-
 	if (devlist == NULL)
 		return FIDO_ERR_INVALID_ARGUMENT;
 
-	scard_r = SCardEstablishContext(SCARD_SCOPE_SYSTEM, 0, 0, &scard_ctx);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardEstablishContext(): 0x%08X", __func__,
-		    scard_r);
-		goto fail;
+	if ((s = SCardEstablishContext(SCARD_SCOPE_SYSTEM, NULL, NULL,
+	    &ctx)) != SCARD_S_SUCCESS || ctx == 0) {
+		fido_log_debug("%s: SCardEstablishContext 0x%lx", __func__, s);
+		if (s == SCARD_E_NO_SERVICE || s == SCARD_E_NO_SMARTCARD)
+			r = FIDO_OK; /* suppress error */
+		goto out;
 	}
 
-	scard_r = SCardListReadersA(scard_ctx, NULL, (LPSTR)&readers_ptr,
-	    &readers_len);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardListReadersA(): 0x%08X", __func__,
-		    scard_r);
-		goto fail;
+	len = SCARD_AUTOALLOCATE;
+	if ((s = SCardListReadersA(ctx, NULL, (void *)&buf,
+	    &len)) != SCARD_S_SUCCESS || buf == NULL) {
+		fido_log_debug("%s: SCardListReadersA 0x%lx", __func__, s);
+		if (s == SCARD_E_NO_READERS_AVAILABLE)
+			r = FIDO_OK; /* suppress error */
+		goto out;
 	}
-	/* XXX pedro: double-check this */
-	if (readers_ptr == NULL) {
-		fido_log_debug("%s: readers_ptr == NULL", __func__);
-		goto fail;
+	/* sanity check "multi-string" */
+	if (len < 2 || buf[len - 1] != 0 || buf[len - 2] != '\0') {
+		fido_log_debug("%s: can't parse buf returned by "
+		    "SCardListReadersA", __func__);
+		goto out;
 	}
 
-	reader = readers_ptr;
-
-	while (*reader != 0) {
-		if (nfc_win_is_fido(scard_ctx, reader) == 0) {
-			if (nfc_win_copy_info(&devlist[*olen], scard_ctx,
-			    reader) == 0) {
-				devlist[*olen].io = (fido_dev_io_t) {
-					fido_nfc_open,
-					fido_nfc_close,
-					fido_nfc_read,
-					fido_nfc_write,
-				};
-				devlist[*olen].transport =
-				    (fido_dev_transport_t) {
-					fido_nfc_rx,
-					fido_nfc_tx,
-				};
-				if (++(*olen) == ilen)
-					break;
-			}
+	for (reader = buf; *reader != 0; reader += strlen(reader) + 1) {
+		if (copy_info(&devlist[*olen], ctx, reader) == 0) {
+			devlist[*olen].io = (fido_dev_io_t) {
+				fido_nfc_open,
+				fido_nfc_close,
+				fido_nfc_read,
+				fido_nfc_write,
+			};
+			devlist[*olen].transport = (fido_dev_transport_t) {
+				fido_nfc_rx,
+				fido_nfc_tx,
+			};
+			if (++(*olen) == ilen)
+				break;
 		}
-		/* XXX pedro: what is this? */
-		reader += (strlen(reader) + 1);
 	}
 
-fail:
-	if (readers_ptr != NULL)
-		SCardFreeMemory(scard_ctx, readers_ptr);
-	if (scard_ctx != 0)
-		SCardReleaseContext(scard_ctx);
+	r = FIDO_OK;
+out:
+	if (buf != NULL)
+		SCardFreeMemory(ctx, buf);
+	if (ctx != 0)
+		SCardReleaseContext(ctx);
 
 	return r;
 }
@@ -549,13 +540,6 @@ nfc_win_write(void *handle, const unsigned char *buf, size_t len)
 	}
 
 	return (int)len;
-}
-
-
-int
-fido_nfc_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
-{
-	return nfc_win_manifest(devlist, ilen, olen);
 }
 
 void *

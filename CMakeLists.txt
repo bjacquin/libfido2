@@ -103,6 +103,7 @@ check_symbol_exists(readpassphrase readpassphrase.h HAVE_READPASSPHRASE)
 check_symbol_exists(recallocarray stdlib.h HAVE_RECALLOCARRAY)
 check_symbol_exists(strlcat string.h HAVE_STRLCAT)
 check_symbol_exists(strlcpy string.h HAVE_STRLCPY)
+check_symbol_exists(strndup string.h HAVE_STRNDUP)
 check_symbol_exists(strsep string.h HAVE_STRSEP)
 check_symbol_exists(sysconf unistd.h HAVE_SYSCONF)
 check_symbol_exists(timespecsub sys/time.h HAVE_TIMESPECSUB)
@@ -133,6 +134,7 @@ list(APPEND CHECK_VARIABLES
 	HAVE_SIGNAL_H
 	HAVE_STRLCAT
 	HAVE_STRLCPY
+	HAVE_STRNDUP
 	HAVE_STRSEP
 	HAVE_SYSCONF
 	HAVE_SYS_RANDOM_H

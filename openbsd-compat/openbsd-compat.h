@@ -54,6 +54,10 @@ size_t strlcat(char *, const char *, size_t);
 size_t strlcpy(char *, const char *, size_t);
 #endif
 
+#if !defined(HAVE_STRNDUP)
+char *strndup(const char *, size_t);
+#endif
+
 #if !defined(HAVE_STRSEP)
 char *strsep(char **, const char *);
 #endif
