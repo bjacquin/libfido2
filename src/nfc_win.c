@@ -455,7 +455,7 @@ fido_nfc_write(void *handle, const unsigned char *buf, size_t len)
 		return -1;
 	}
 	dev->rx_len = (size_t)n;
-	fido_log_xxd(dev->rx_buf, dev->rx_len, "%s: read %zu bytes", __func__);
+	fido_log_xxd(dev->rx_buf, dev->rx_len, "%s: read", __func__);
 		
 	return (int)len;
 }
