@@ -14,10 +14,9 @@ static const uint8_t select_apdu[] = {
 	0x00, 0xa4, 0x04, 0x00, 0x08, 0xA0, 0x00,
 	0x00, 0x06 ,0x47, 0x2F, 0x00, 0x01, 0x00,
 };
-
 static const uint8_t v_u2f[] = { 'U', '2', 'F', '_', 'V', '2' };
 static const uint8_t v_fido[] = { 'F', 'I', 'D', 'O', '_', '2', '_', '0' };
-static const char *nfc_win_path_prefix = "\\\\?\\nfc#";
+static const char prefix[] = FIDO_NFC_PREFIX "//winscard:{";
 
 struct nfc_win {
 	SCARDCONTEXT        scard_ctx;
@@ -165,20 +164,24 @@ nfc_win_strdup_n(const char *src, size_t len)
 	return dst;
 }
 
-static int
-nfc_win_is_nfc_path(const char *path)
-{
-	return strncmp(path, nfc_win_path_prefix, strlen(nfc_win_path_prefix));
-}
-
 static char *
-nfc_win_get_reader(const char *path)
+get_reader(const char *path)
 {
+	char *o = NULL, *p;
 	char *reader = NULL;
 
-	/* XXX pedro: check + strlen() */
-	if (nfc_win_is_nfc_path(path) == 0)
-		reader = strdup(path + strlen(nfc_win_path_prefix));
+	if (path == NULL)
+		goto out;
+	if ((o = p = strdup(path)) == NULL ||
+	    strncmp(p, prefix, strlen(prefix)) != 0)
+		goto out;
+	p += strlen(prefix);
+	if (strlen(p) == 0 || p[strlen(p) - 1] != '}')
+		goto out;
+	p[strlen(p) - 1] = '\0';
+	reader = strdup(p);
+out:
+	free(o);
 
 	return reader;
 }
@@ -409,8 +412,9 @@ nfc_win_free(struct nfc_win **ctx_p)
 	*ctx_p = NULL;
 }
 
-static void *
-nfc_win_open(const char *path)
+
+void *
+fido_nfc_open(const char *path)
 {
 	struct nfc_win      *ctx = NULL;
 	char                *reader = NULL;
@@ -420,8 +424,8 @@ nfc_win_open(const char *path)
 	DWORD               scard_active_protocol = 0;
 	LONG                scard_r;
 
-	if ((reader = nfc_win_get_reader(path)) == NULL) {
-		fido_log_debug("%s: nfc_win_get_reader(%s)", __func__, path);
+	if ((reader = get_reader(path)) == NULL) {
+		fido_log_debug("%s: get_reader(%s)", __func__, path);
 		goto fail;
 	}
 
@@ -468,8 +472,7 @@ fail:
 		SCardDisconnect(scard_handle, SCARD_LEAVE_CARD);
 	if (scard_ctx != 0)
 		SCardReleaseContext(scard_ctx);
-	if (reader != NULL)
-		free(reader);
+	free(reader);
 
 	return NULL;
 }
@@ -540,12 +543,6 @@ nfc_win_write(void *handle, const unsigned char *buf, size_t len)
 	}
 
 	return (int)len;
-}
-
-void *
-fido_nfc_open(const char *path)
-{
-	return nfc_win_open(path);
 }
 
 void
