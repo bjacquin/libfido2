@@ -240,7 +240,7 @@ copy_info(fido_dev_info_t *di, SCARDCONTEXT ctx, const char *reader)
 		fido_log_debug("%s: prepare_io_request", __func__);
 		goto fail;
 	}
-	if (is_fido(h, &req) < 0) {
+	if (is_fido(h, &req) == false) {
 		fido_log_debug("%s: skipping %s", __func__, reader);
 		goto fail;
 	}
@@ -410,8 +410,16 @@ fido_nfc_read(void *handle, unsigned char *buf, size_t len, int ms)
 	int r;
 
 	(void)ms;
-	if (dev->rx_len == 0 || dev->rx_len > len || dev->rx_len > INT_MAX) {
-		fido_log_debug("%s: rx_len", __func__);
+	if (dev->rx_len == 0) {
+		fido_log_debug("%s: dev->rx_len == 0", __func__);
+		return -1;
+	}
+	if (dev->rx_len > INT_MAX) {
+		fido_log_debug("%s: dev->rx_len > INT_MAX", __func__);
+		return -1;
+	}
+	if (dev->rx_len > len) {
+		fido_log_debug("%s: %zu > %zu", __func__, dev->rx_len, len);
 		return -1;
 	}
 	memcpy(buf, dev->rx_buf, dev->rx_len);
@@ -440,13 +448,14 @@ fido_nfc_write(void *handle, const unsigned char *buf, size_t len)
 	explicit_bzero(dev->rx_buf, sizeof(dev->rx_buf));
 	dev->rx_len = 0;
 	n = (DWORD)sizeof(dev->rx_buf);
-	if ((s = SCardTransmit(dev->ctx, &dev->req, buf, (DWORD)len, NULL,
+	if ((s = SCardTransmit(dev->h, &dev->req, buf, (DWORD)len, NULL,
 	    dev->rx_buf, &n)) != SCARD_S_SUCCESS) {
 		fido_log_debug("%s: SCardTransmit 0x%lx", __func__, s);
 		explicit_bzero(dev->rx_buf, sizeof(dev->rx_buf));
 		return -1;
 	}
 	dev->rx_len = (size_t)n;
+	fido_log_xxd(dev->rx_buf, dev->rx_len, "%s: read %zu bytes", __func__);
 		
 	return (int)len;
 }
