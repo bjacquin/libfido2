@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2022 Micro Focus or one of its affiliates.
+ * Copyright (c) 2022 Yubico AB. All rights reserved.
  * Use of this source code is governed by a BSD-style
  * license that can be found in the LICENSE file.
  */
@@ -11,28 +12,29 @@
 #include "iso7816.h"
 
 static const uint8_t select_apdu[] = {
-	0x00, 0xa4, 0x04, 0x00, 0x08, 0xA0, 0x00,
-	0x00, 0x06 ,0x47, 0x2F, 0x00, 0x01, 0x00,
+	0x00, 0xa4, 0x04, 0x00, 0x08, 0xa0, 0x00,
+	0x00, 0x06 ,0x47, 0x2f, 0x00, 0x01, 0x00,
 };
 static const uint8_t v_u2f[] = { 'U', '2', 'F', '_', 'V', '2' };
 static const uint8_t v_fido[] = { 'F', 'I', 'D', 'O', '_', '2', '_', '0' };
 static const char prefix[] = FIDO_NFC_PREFIX "//winscard:{";
 
 struct nfc_win {
-	SCARDCONTEXT        scard_ctx;
-	SCARDHANDLE         scard_handle;
-	SCARD_IO_REQUEST    scard_tx_pci;
-	uint8_t             rx_buf[FIDO_MAXMSG];
-	DWORD               rx_len;
+	SCARDCONTEXT     ctx;
+	SCARDHANDLE      h;
+	SCARD_IO_REQUEST req;
+	uint8_t          rx_buf[FIDO_MAXMSG];
+	size_t           rx_len;
 };
 
-static int
-nfc_win_tx(fido_dev_t *dev, uint8_t cmd, const unsigned char *buf, size_t count)
+int
+fido_nfc_tx(fido_dev_t *dev, uint8_t cmd, const unsigned char *buf,
+    size_t count)
 {
-	iso7816_apdu_t  *apdu = NULL;
-	const uint8_t   *ptr;
-	size_t          len;
-	int             ok = -1;
+	iso7816_apdu_t *apdu = NULL;
+	const uint8_t *ptr;
+	size_t len;
+	int ok = -1;
 
 	switch (cmd) {
 	case CTAP_CMD_INIT: /* select */
@@ -50,16 +52,14 @@ nfc_win_tx(fido_dev_t *dev, uint8_t cmd, const unsigned char *buf, size_t count)
 		len = iso7816_len(apdu);
 		break;
 	case CTAP_CMD_MSG: /* already an apdu */
-		ptr = buf;
-		len = count;
 		break;
 	default:
-		fido_log_debug("%s: cmd=0x%02X", __func__, cmd);
+		fido_log_debug("%s: cmd=%02x", __func__, cmd);
 		goto fail;
 	}
 
 	if (dev->io.write(dev->io_handle, ptr, len) < 0) {
-		fido_log_debug("%s: io.write()", __func__);
+		fido_log_debug("%s: write", __func__);
 		goto fail;
 	}
 
@@ -71,97 +71,59 @@ fail:
 }
 
 static int
-nfc_win_rx_init(fido_dev_t *dev, unsigned char *buf, size_t count)
+rx_init(fido_dev_t *d, unsigned char *buf, size_t count)
 {
-	fido_ctap_info_t    *attr = (fido_ctap_info_t *)buf;
-	uint8_t             f[64];
-	int                 n;
+	fido_ctap_info_t *attr = (fido_ctap_info_t *)buf;
+	uint8_t f[64];
+	int n;
 
 	if (count != sizeof(*attr)) {
 		fido_log_debug("%s: count=%zu", __func__, count);
 		return -1;
 	}
-
 	memset(attr, 0, sizeof(*attr));
-
-	if ((n = dev->io.read(dev->io_handle, f, sizeof(f), -1)) < 2 ||
+	if ((n = d->io.read(d->io_handle, f, sizeof(f), -1)) < 2 ||
 	    (f[n - 2] << 8 | f[n - 1]) != SW_NO_ERROR) {
 		fido_log_debug("%s: io.read()", __func__);
 		return -1;
 	}
-
 	n -= 2;
-
 	if (n == sizeof(v_u2f) && memcmp(f, v_u2f, sizeof(v_u2f)) == 0)
 		attr->flags = FIDO_CAP_CBOR;
 	else if (n == sizeof(v_fido) && memcmp(f, v_fido, sizeof(v_fido)) == 0)
 		attr->flags = FIDO_CAP_CBOR | FIDO_CAP_NMSG;
 	else {
 		fido_log_debug("%s: unknown version string", __func__);
-#ifdef FIDO_FUZZ
-		attr->flags = FIDO_CAP_CBOR | FIDO_CAP_NMSG;
-#else
 		return -1;
-#endif
 	}
-
-	memcpy(&attr->nonce, &dev->nonce, sizeof(attr->nonce)); /* XXX */
+	memcpy(&attr->nonce, &d->nonce, sizeof(attr->nonce)); /* XXX */
 
 	return (int)count;
 }
 
-static int
-nfc_win_rx_msg(fido_dev_t *dev, unsigned char *buf, size_t count)
+int
+fido_nfc_rx(fido_dev_t *d, uint8_t cmd, unsigned char *buf, size_t count, int ms)
 {
 	int n;
 
-	if ((n = dev->io.read(dev->io_handle, buf, count, -1)) < 2) {
-		fido_log_debug("%s: read", __func__);
-		return -1;
+	switch (cmd) {
+	case CTAP_CMD_INIT:
+		return rx_init(d, buf, count);
+	case CTAP_CMD_CBOR:
+	case CTAP_CMD_MSG:
+		if ((n = d->io.read(d->io_handle, buf, count, ms)) < 2) {
+			fido_log_debug("%s: read", __func__);
+			return -1;
+		}
+		if (cmd == CTAP_CMD_CBOR)
+			n -= 2; /* trim? XXX pedro */
+		break;
+	default:
+		fido_log_debug("%s: cmd=%02x", __func__, cmd);
+		break;
 	}
 
 	return n;
-}
-
-static int
-nfc_win_rx_cbor(fido_dev_t *dev, unsigned char *buf, size_t count)
-{
-	int n;
-
-	if ((n = nfc_win_rx_msg(dev, buf, count)) < 2)
-		return -1;
-
-	return n - 2;
-}
-
-static int
-nfc_win_rx(fido_dev_t *dev, uint8_t cmd, unsigned char *buf, size_t count)
-{
-	switch (cmd) {
-	case CTAP_CMD_INIT:
-		return nfc_win_rx_init(dev, buf, count);
-	case CTAP_CMD_CBOR:
-		return nfc_win_rx_cbor(dev, buf, count);
-	case CTAP_CMD_MSG:
-		return nfc_win_rx_msg(dev, buf, count);
-	default:
-		fido_log_debug("%s: cmd=%02x", __func__, cmd);
-		return -1;
-	}
-}
-
-static char *
-nfc_win_strdup_n(const char *src, size_t len)
-{
-	char *dst;
-
-	/* XXX pedro: fix len + 1 */
-	if ((dst = malloc(len + 1)) != NULL) {
-		memcpy(dst, src, len);
-		dst[len] = 0;
-	}
-
-	return dst;
 }
 
 static char *
@@ -375,205 +337,115 @@ out:
 	return r;
 }
 
-static struct nfc_win *
-nfc_win_new(SCARDCONTEXT scard_ctx, SCARDHANDLE scard_handle,
-    SCARD_IO_REQUEST scard_tx_pci)
-{
-	struct nfc_win *ctx;
-
-	if ((ctx = malloc(sizeof(*ctx))) == NULL) {
-		fido_log_debug("%s: malloc", __func__);
-		return NULL;
-	}
-
-	ctx->scard_ctx = scard_ctx;
-	ctx->scard_handle = scard_handle;
-	ctx->scard_tx_pci = scard_tx_pci;
-	ctx->rx_len = 0;
-	explicit_bzero(ctx->rx_buf, sizeof(ctx->rx_buf));
-
-	return ctx;
-}
-
-static void
-nfc_win_free(struct nfc_win **ctx_p)
-{
-	struct nfc_win *ctx;
-
-	if (ctx_p == NULL || (ctx = *ctx_p) == NULL)
-		return;
-	if (ctx->scard_handle != 0)
-		SCardDisconnect(ctx->scard_handle, SCARD_LEAVE_CARD);
-	if (ctx->scard_ctx != 0)
-		SCardReleaseContext(ctx->scard_ctx);
-
-	explicit_bzero(ctx->rx_buf, sizeof(ctx->rx_buf));
-	free(ctx);
-	*ctx_p = NULL;
-}
-
-
 void *
 fido_nfc_open(const char *path)
 {
-	struct nfc_win      *ctx = NULL;
-	char                *reader = NULL;
-	SCARDCONTEXT        scard_ctx = 0;
-	SCARDHANDLE         scard_handle = 0;
-	SCARD_IO_REQUEST    scard_tx_pci;
-	DWORD               scard_active_protocol = 0;
-	LONG                scard_r;
+	char *reader;
+	struct nfc_win *dev = NULL;
+	SCARDCONTEXT ctx = 0;
+	SCARDHANDLE h = 0;
+	SCARD_IO_REQUEST req;
+	DWORD prot = 0;
+	LONG s;
+
+	memset(&req, 0, sizeof(req));
 
 	if ((reader = get_reader(path)) == NULL) {
 		fido_log_debug("%s: get_reader(%s)", __func__, path);
 		goto fail;
 	}
+	if ((s = SCardEstablishContext(SCARD_SCOPE_SYSTEM, NULL, NULL,
+	    &ctx)) != SCARD_S_SUCCESS || ctx == 0) {
+		fido_log_debug("%s: SCardEstablishContext 0x%lx", __func__, s);
+		goto fail;
 
-	scard_r = SCardEstablishContext(SCARD_SCOPE_SYSTEM, 0, 0, &scard_ctx);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardEstablishContext(): 0x%08X", __func__,
-		    scard_r);
+	}
+	if ((s = SCardConnectA(ctx, reader, SCARD_SHARE_SHARED,
+	    SCARD_PROTOCOL_Tx, &h, &prot)) != SCARD_S_SUCCESS) {
+		fido_log_debug("%s: SCardConnectA 0x%x", __func__, s);
 		goto fail;
 	}
-
-	scard_r = SCardConnectA(scard_ctx, reader, SCARD_SHARE_SHARED,
-	    SCARD_PROTOCOL_Tx, &scard_handle, &scard_active_protocol);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardConnectA(%s) - 0x%08X", __func__, reader, scard_r);
+	if (prepare_io_request(prot, &req) < 0) {
+		fido_log_debug("%s: prepare_io_request", __func__);
 		goto fail;
 	}
-
-	fido_log_debug("%s: scard_active_protocol: 0x%08X", __func__,
-	    scard_active_protocol);
-
-	switch (scard_active_protocol) {
-	case SCARD_PROTOCOL_T0:
-		scard_tx_pci.dwProtocol = SCARD_PCI_T0->dwProtocol;
-		scard_tx_pci.cbPciLength = SCARD_PCI_T0->cbPciLength;
-		break;
-	case SCARD_PROTOCOL_T1:
-		scard_tx_pci.dwProtocol = SCARD_PCI_T1->dwProtocol;
-		scard_tx_pci.cbPciLength = SCARD_PCI_T1->cbPciLength;
-		break;
-	default:
-		fido_log_debug("%s: unknown card protocol", __func__);
+	if ((dev = calloc(1, sizeof(*dev))) == NULL)
 		goto fail;
-	}
 
-	if ((ctx = nfc_win_new(scard_ctx, scard_handle,
-	    scard_tx_pci)) == NULL) {
-		fido_log_debug("%s: nfc_win_new", __func__);
-		goto fail;
-	}
-
-	return ctx;
+	dev->ctx = ctx;
+	dev->h = h;
+	ctx->req = req;
+	ctx = 0;
+	h = 0;
 fail:
-	if (scard_handle != 0)
-		SCardDisconnect(scard_handle, SCARD_LEAVE_CARD);
-	if (scard_ctx != 0)
-		SCardReleaseContext(scard_ctx);
+	if (h != 0)
+		SCardDisconnect(h, SCARD_LEAVE_CARD);
+	if (ctx != 0)
+		SCardReleaseContext(ctx);
 	free(reader);
 
-	return NULL;
-}
-
-static void
-nfc_win_close(void *handle)
-{
-	struct nfc_win *ctx = handle;
-
-	if (ctx->scard_handle != 0)
-		SCardDisconnect(ctx->scard_handle, SCARD_LEAVE_CARD);
-	if (ctx->scard_ctx != 0)
-		SCardReleaseContext(ctx->scard_ctx);
-	if (ctx->rx_len > 0)
-		explicit_bzero(ctx->rx_buf, (size_t)ctx->rx_len);
-
-	nfc_win_free(&ctx);
-}
-
-static int
-nfc_win_read(void *handle, unsigned char *buf, size_t len)
-{
-	struct nfc_win *ctx = handle;
-	size_t r;
-
-	if (ctx->rx_len == 0) {
-		fido_log_debug("%s: rx_len", __func__);
-		return -1;
-	}
-
-	if (ctx->rx_len > len) {
-		fido_log_debug("%s: rx_len", __func__);
-		return -1;
-	}
-
-	memcpy(buf, ctx->rx_buf, ctx->rx_len);
-	r = ctx->rx_len;
-	explicit_bzero(ctx->rx_buf, (size_t)ctx->rx_len);
-	ctx->rx_len = 0;
-
-	return (int)r;
-}
-
-static int
-nfc_win_write(void *handle, const unsigned char *buf, size_t len)
-{
-	struct nfc_win *ctx = handle;
-	LONG scard_r;
-
-	fido_log_xxd(buf, len, "%s", __func__);
-
-	if (len > INT_MAX) {
-		fido_log_debug("%s: len", __func__);
-		return -1;
-	}
-
-	if (ctx->rx_len > 0)
-		explicit_bzero(ctx->rx_buf, (size_t)ctx->rx_len);
-
-	ctx->rx_len = sizeof(ctx->rx_buf);
-	scard_r = SCardTransmit(ctx->scard_handle, &ctx->scard_tx_pci, buf,
-	    (DWORD)len, NULL, ctx->rx_buf, &ctx->rx_len);
-	if (scard_r != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardTransmit(): 0x%08X", __func__,
-		    scard_r);
-		ctx->rx_len = 0;
-		return -1;
-	}
-
-	return (int)len;
+	return dev;
 }
 
 void
 fido_nfc_close(void *handle)
 {
-	nfc_win_close(handle);
+	struct nfc_win *dev = handle;
+
+	if (dev_p == NULL || (dev = *dev_p) == NULL)
+		return;
+	if (dev->h != 0)
+		SCardDisconnect(h, SCARD_LEAVE_CARD);
+	if (dev->ctx != 0)
+		SCardReleaseContext(dev->ctx);
+
+	explicit_bzero(dev->rx_buf, sizeof(dev->rx_buf));
+	free(dev);
+	*dev_p = NULL;
 }
 
 int
 fido_nfc_read(void *handle, unsigned char *buf, size_t len, int ms)
 {
-	(void)ms;
-	return nfc_win_read(handle, buf, len);
+	struct nfc_win *dev = handle;
+	int r;
+
+	if (dev->rx_len == 0 || dev->rx_len > len || dev->rx_len > INT_MAX) {
+		fido_log_debug("%s: rx_len", __func__);
+		return -1;
+	}
+	memcpy(buf, dev->rx_buf, dev->rx_len);
+	explicit_bzero(dev->rx_buf, sizeof(dev->rx_buf));
+	r = (int)dev->rx_len;
+	dev->rx_len = 0;
+
+	return r;
 }
 
 int
 fido_nfc_write(void *handle, const unsigned char *buf, size_t len)
 {
-	return nfc_win_write(handle, buf, len);
-}
+	struct nfc_win *ctx = handle;
+	LONG scard_r;
 
-int
-fido_nfc_tx(fido_dev_t *dev, uint8_t cmd, const unsigned char *buf,
-    size_t count)
-{
-	return nfc_win_tx(dev, cmd, buf, count);
-}
-
-int
-fido_nfc_rx(fido_dev_t *dev, uint8_t cmd, unsigned char *buf, size_t count, int ms)
-{
-	(void)ms;
-	return nfc_win_rx(dev, cmd, buf, count);
+	if (len > INT_MAX) {
+		fido_log_debug("%s: len", __func__);
+		return -1;
+	}
+	if (ctx->rx_len) {
+		fido_log_xxd(ctx->rx_buf, ctx->rx_len, "%s: dropping %zu bytes "
+		    "from input buffer", __func__, ctx->rx_len);
+	}
+	explicit_bzero(ctx->rx_buf, sizeof(ctx->rx_buf));
+	ctx->rx_len = 0;
+	n = (DWORD)sizeof(ctx->rx_buf);
+	if ((s = SCardTransmit(dev->ctx, &dev->req, buf, (DWORD)len, NULL,
+	    ctx->rx_buf, &n)) != SCARD_S_SUCCESS) {
+		fido_log_debug("%s: SCardTransmit 0x%lx", __func__, s);
+		explicit_bzero(ctx->rx_buf, sizeof(ctx->rx_buf));
+		return -1;
+	}
+	ctx->rx_len = (size_t)n;
+		
+	return (int)len;
 }
