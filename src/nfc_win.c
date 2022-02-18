@@ -52,6 +52,8 @@ fido_nfc_tx(fido_dev_t *dev, uint8_t cmd, const unsigned char *buf,
 		len = iso7816_len(apdu);
 		break;
 	case CTAP_CMD_MSG: /* already an apdu */
+		ptr = buf;
+		len = count;
 		break;
 	default:
 		fido_log_debug("%s: cmd=%02x", __func__, cmd);
@@ -104,7 +106,7 @@ rx_init(fido_dev_t *d, unsigned char *buf, size_t count)
 int
 fido_nfc_rx(fido_dev_t *d, uint8_t cmd, unsigned char *buf, size_t count, int ms)
 {
-	int n;
+	int n = -1;
 
 	switch (cmd) {
 	case CTAP_CMD_INIT:
@@ -374,7 +376,7 @@ fido_nfc_open(const char *path)
 
 	dev->ctx = ctx;
 	dev->h = h;
-	ctx->req = req;
+	dev->req = req;
 	ctx = 0;
 	h = 0;
 fail:
@@ -392,16 +394,13 @@ fido_nfc_close(void *handle)
 {
 	struct nfc_win *dev = handle;
 
-	if (dev_p == NULL || (dev = *dev_p) == NULL)
-		return;
 	if (dev->h != 0)
-		SCardDisconnect(h, SCARD_LEAVE_CARD);
+		SCardDisconnect(dev->h, SCARD_LEAVE_CARD);
 	if (dev->ctx != 0)
 		SCardReleaseContext(dev->ctx);
 
 	explicit_bzero(dev->rx_buf, sizeof(dev->rx_buf));
 	free(dev);
-	*dev_p = NULL;
 }
 
 int
@@ -410,6 +409,7 @@ fido_nfc_read(void *handle, unsigned char *buf, size_t len, int ms)
 	struct nfc_win *dev = handle;
 	int r;
 
+	(void)ms;
 	if (dev->rx_len == 0 || dev->rx_len > len || dev->rx_len > INT_MAX) {
 		fido_log_debug("%s: rx_len", __func__);
 		return -1;
@@ -425,27 +425,28 @@ fido_nfc_read(void *handle, unsigned char *buf, size_t len, int ms)
 int
 fido_nfc_write(void *handle, const unsigned char *buf, size_t len)
 {
-	struct nfc_win *ctx = handle;
-	LONG scard_r;
+	struct nfc_win *dev = handle;
+	DWORD n;
+	LONG s;
 
 	if (len > INT_MAX) {
 		fido_log_debug("%s: len", __func__);
 		return -1;
 	}
-	if (ctx->rx_len) {
-		fido_log_xxd(ctx->rx_buf, ctx->rx_len, "%s: dropping %zu bytes "
-		    "from input buffer", __func__, ctx->rx_len);
+	if (dev->rx_len) {
+		fido_log_xxd(dev->rx_buf, dev->rx_len, "%s: dropping %zu bytes "
+		    "from input buffer", __func__, dev->rx_len);
 	}
-	explicit_bzero(ctx->rx_buf, sizeof(ctx->rx_buf));
-	ctx->rx_len = 0;
-	n = (DWORD)sizeof(ctx->rx_buf);
+	explicit_bzero(dev->rx_buf, sizeof(dev->rx_buf));
+	dev->rx_len = 0;
+	n = (DWORD)sizeof(dev->rx_buf);
 	if ((s = SCardTransmit(dev->ctx, &dev->req, buf, (DWORD)len, NULL,
-	    ctx->rx_buf, &n)) != SCARD_S_SUCCESS) {
+	    dev->rx_buf, &n)) != SCARD_S_SUCCESS) {
 		fido_log_debug("%s: SCardTransmit 0x%lx", __func__, s);
-		explicit_bzero(ctx->rx_buf, sizeof(ctx->rx_buf));
+		explicit_bzero(dev->rx_buf, sizeof(dev->rx_buf));
 		return -1;
 	}
-	ctx->rx_len = (size_t)n;
+	dev->rx_len = (size_t)n;
 		
 	return (int)len;
 }
