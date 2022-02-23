@@ -6,10 +6,18 @@
  */
 
 #include <winscard.h>
+#include <reader.h>
 
 #include "fido.h"
 #include "fido/param.h"
 #include "iso7816.h"
+
+#ifdef __WIN32
+#define SCardConnect SCardConnectA
+#define SCardListReaders SCardListReadersA
+#else
+#define SCARD_PROTOCOL_Tx SCARD_PROTOCOL_ANY
+#endif
 
 static const uint8_t select_apdu[] = {
 	0x00, 0xa4, 0x04, 0x00, 0x08, 0xa0, 0x00,
@@ -17,9 +25,9 @@ static const uint8_t select_apdu[] = {
 };
 static const uint8_t v_u2f[] = { 'U', '2', 'F', '_', 'V', '2' };
 static const uint8_t v_fido[] = { 'F', 'I', 'D', 'O', '_', '2', '_', '0' };
-static const char prefix[] = FIDO_NFC_PREFIX "//winscard:{";
+static const char prefix[] = FIDO_NFC_PREFIX "//pcsc:{";
 
-struct nfc_win {
+struct pcsc {
 	SCARDCONTEXT     ctx;
 	SCARDHANDLE      h;
 	SCARD_IO_REQUEST req;
@@ -62,7 +70,7 @@ prepare_io_request(DWORD prot, SCARD_IO_REQUEST *req)
 		req->cbPciLength = SCARD_PCI_T1->cbPciLength;
 		break;
 	default:
-		fido_log_debug("%s: unknown protocol %u", __func__, prot);
+		fido_log_debug("%s: unknown protocol %lu", __func__, prot);
 		return -1;
 	}
 
@@ -130,9 +138,9 @@ copy_info(fido_dev_info_t *di, SCARDCONTEXT ctx, const char *reader)
 	memset(di, 0, sizeof(*di));
 	memset(&req, 0, sizeof(req));
 
-	if ((s = SCardConnectA(ctx, reader, SCARD_SHARE_SHARED,
+	if ((s = SCardConnect(ctx, reader, SCARD_SHARE_SHARED,
 	    SCARD_PROTOCOL_Tx, &h, &prot)) != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardConnectA 0x%x", __func__, s);
+		fido_log_debug("%s: SCardConnect 0x%lx", __func__, s);
 		goto fail;
 	}
 	if (prepare_io_request(prot, &req) < 0) {
@@ -143,7 +151,7 @@ copy_info(fido_dev_info_t *di, SCARDCONTEXT ctx, const char *reader)
 		fido_log_debug("%s: skipping %s", __func__, reader);
 		goto fail;
 	}
-	if ((r = snprintf(path, sizeof(path), "%s//winscard:{%s}",
+	if ((r = snprintf(path, sizeof(path), "%s//pcsc:{%s}",
 	    FIDO_NFC_PREFIX, reader)) < 0 || (size_t)r >= sizeof(path)) {
 		fido_log_debug("%s: snprintf", __func__);
 		goto fail;
@@ -197,9 +205,9 @@ fido_nfc_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
 	}
 
 	len = SCARD_AUTOALLOCATE;
-	if ((s = SCardListReadersA(ctx, NULL, (void *)&buf,
+	if ((s = SCardListReaders(ctx, NULL, (void *)&buf,
 	    &len)) != SCARD_S_SUCCESS || buf == NULL) {
-		fido_log_debug("%s: SCardListReadersA 0x%lx", __func__, s);
+		fido_log_debug("%s: SCardListReaders 0x%lx", __func__, s);
 		if (s == SCARD_E_NO_READERS_AVAILABLE)
 			r = FIDO_OK; /* suppress error */
 		goto out;
@@ -207,7 +215,7 @@ fido_nfc_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
 	/* sanity check "multi-string" */
 	if (len < 2 || buf[len - 1] != 0 || buf[len - 2] != '\0') {
 		fido_log_debug("%s: can't parse buf returned by "
-		    "SCardListReadersA", __func__);
+		    "SCardListReaders", __func__);
 		goto out;
 	}
 
@@ -242,7 +250,7 @@ void *
 fido_nfc_open(const char *path)
 {
 	char *reader;
-	struct nfc_win *dev = NULL;
+	struct pcsc *dev = NULL;
 	SCARDCONTEXT ctx = 0;
 	SCARDHANDLE h = 0;
 	SCARD_IO_REQUEST req;
@@ -261,9 +269,9 @@ fido_nfc_open(const char *path)
 		goto fail;
 
 	}
-	if ((s = SCardConnectA(ctx, reader, SCARD_SHARE_SHARED,
+	if ((s = SCardConnect(ctx, reader, SCARD_SHARE_SHARED,
 	    SCARD_PROTOCOL_Tx, &h, &prot)) != SCARD_S_SUCCESS) {
-		fido_log_debug("%s: SCardConnectA 0x%x", __func__, s);
+		fido_log_debug("%s: SCardConnect 0x%lx", __func__, s);
 		goto fail;
 	}
 	if (prepare_io_request(prot, &req) < 0) {
@@ -291,7 +299,7 @@ fail:
 void
 fido_nfc_close(void *handle)
 {
-	struct nfc_win *dev = handle;
+	struct pcsc *dev = handle;
 
 	if (dev->h != 0)
 		SCardDisconnect(dev->h, SCARD_LEAVE_CARD);
@@ -305,7 +313,7 @@ fido_nfc_close(void *handle)
 int
 fido_nfc_read(void *handle, unsigned char *buf, size_t len, int ms)
 {
-	struct nfc_win *dev = handle;
+	struct pcsc *dev = handle;
 	int r;
 
 	(void)ms;
@@ -332,7 +340,7 @@ fido_nfc_read(void *handle, unsigned char *buf, size_t len, int ms)
 int
 fido_nfc_write(void *handle, const unsigned char *buf, size_t len)
 {
-	struct nfc_win *dev = handle;
+	struct pcsc *dev = handle;
 	DWORD n;
 	LONG s;
 

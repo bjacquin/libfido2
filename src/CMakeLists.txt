@@ -55,7 +55,7 @@ if(USE_HIDAPI)
 		list(APPEND FIDO_SOURCES hid_unix.c)
 	endif()
 elseif(WIN32)
-	list(APPEND FIDO_SOURCES hid_win.c nfc.c nfc_win.c)
+	list(APPEND FIDO_SOURCES hid_win.c nfc.c pcsc.c)
 	if(USE_WINHELLO)
 		list(APPEND FIDO_SOURCES winhello.c)
 	endif()
@@ -72,6 +72,10 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR
 	list(APPEND FIDO_SOURCES hid_freebsd.c hid_unix.c)
 else()
 	message(FATAL_ERROR "please define a hid backend for your platform")
+endif()
+
+if(USE_PCSC AND NOT WIN32)
+	list(APPEND FIDO_SOURCES nfc.c pcsc.c)
 endif()
 
 if(NOT MSVC)
@@ -103,6 +107,7 @@ list(APPEND TARGET_LIBRARIES
 	${UDEV_LIBRARIES}
 	${BASE_LIBRARIES}
 	${HIDAPI_LIBRARIES}
+	${PCSC_LIBRARIES}
 	${ZLIB_LIBRARIES}
 )
 
